@@ -1,0 +1,64 @@
+# Temporary, only in the fork: builds a test APK of this branch and publishes it as a pre-release,
+# so it can be installed from a phone. Not part of the upstream pull request.
+name: Test APK
+
+on:
+  push:
+    branches: [claude/project-thread-h8d0mm]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The same debug key every run, so a newer test installs over the last one.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: tellyscope-de-test-debug-key
+
+      # Same as upstream CI: debug + release assemble (with the 3.5 MB size gate), unit tests, lint.
+      - run: ./gradlew build --console=plain
+
+      - name: Release APK size
+        run: ls -l app/build/outputs/apk/github/release/*.apk | tee size.txt
+
+      # A debug build with its own app ID (app.tellyscope.detest), so it installs next to the real
+      # Tellyscope and an upstream Alpha. The sed only touches this runner's checkout.
+      - run: |
+          sed -i 's/applicationIdSuffix = ".alpha"/applicationIdSuffix = ".detest"/; s/versionNameSuffix = "-alpha.$run"/versionNameSuffix = "-detest.$run"/' app/build.gradle.kts
+          grep -n 'detest' app/build.gradle.kts
+          ./gradlew :app:assembleGithubDebug -Ptellyscope.alpha=${{ github.run_number }} --console=plain
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="test-de-${{ github.run_number }}-${{ github.run_attempt }}"
+          cp app/build/outputs/apk/github/debug/*.apk "Tellyscope-de-test-${{ github.run_number }}.apk"
+          size=$(awk '{print $5}' size.txt | head -1)
+          gh release create "$tag" "Tellyscope-de-test-${{ github.run_number }}.apk" \
+            --target "${{ github.sha }}" --prerelease \
+            --title "Tellyscope Deutsch Test ${{ github.run_number }}" \
+            --notes "Testversion mit deutscher Übersetzung. Installiert sich als eigene App neben der normalen Tellyscope. Release-APK-Größe: $size Bytes (Grenze 3.500.000). Die App bietet alle 30 Minuten ein Update an: einfach ignorieren, das wäre die normale englische Tellyscope."
+
+      - name: Upload reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports
+          path: |
+            **/build/reports/
+            **/build/test-results/
+          retention-days: 7
